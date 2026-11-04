@@ -36,7 +36,13 @@ LOG_FILE="/var/log/tailscale-oneclick.log"
 SUDOERS_FILE="/etc/sudoers.d/90-opsagent"
 OPS_DIR="/etc/opsagent"
 ALLOW_FILE="${OPS_DIR}/services.allow"
-SSHD_DROPIN="/etc/ssh/sshd_config.d/99-tailscale-oneclick.conf"
+SSHD_DROPIN="/etc/ssh/sshd_config.d/00-0-tailscale-oneclick.conf"
+# 注意文件名故意用 "00-0-"：sshd 对 scalar 选项是"先出现者生效"，
+# 而 sshd_config 里的 Include 在文件开头，drop-in 按字典序加载。
+# 云镜像常见 /etc/ssh/sshd_config.d/00-<厂商>.conf（例如 00-mofang.conf 里写着
+# PermitRootLogin yes），用 "99-" 会被它压住；"00-0-" 排在所有 "00-<字母>" 之前，
+# 才能保证我们的 PermitRootLogin no / PasswordAuthentication no 真正生效。
+# 收口后脚本还会用 sshd -T 校验生效值，不达标就回滚，不会假装成功。
 SSHD_BACKUP="${STATE_DIR}/sshd-dropin.bak"
 AUDIT_RULE="/etc/audit/rules.d/40-opsagent.rules"
 
@@ -250,7 +256,21 @@ ts_backend_state() {
 
 ts_ipv4() {
     command -v tailscale >/dev/null 2>&1 || return 0
-    tailscale ip -4 2>/dev/null | head -n1
+    # 注意：head 提前关闭管道会让 tailscale 收到 SIGPIPE，配合 pipefail 会把
+    # 整个函数变成非 0 退出码；末尾的 || true 是必须的。
+    tailscale ip -4 2>/dev/null | head -n1 || true
+}
+
+# 生成"去掉 --advertise-tags"的参数副本，结果放在全局 RETRY_ARGS
+RETRY_ARGS=()
+build_no_tag_args() {
+    RETRY_ARGS=()
+    local skip=0 a
+    for a in "$@"; do
+        if [[ $skip -eq 1 ]]; then skip=0; continue; fi
+        if [[ $a == "--advertise-tags" ]]; then skip=1; continue; fi
+        RETRY_ARGS+=("$a")
+    done
 }
 
 # ------------------------------- 阶段一：安装 --------------------------------
@@ -281,6 +301,8 @@ preflight() {
     fi
     if [[ -n "$TS_AUTHKEY" ]]; then
         ok "auth key：$(mask "$TS_AUTHKEY")"
+    elif [[ "$(ts_backend_state)" == "Running" ]]; then
+        ok "已登录 tailnet，不需要 auth key"
     else
         warn "没有 auth key，将走交互式登录（打印 URL 等你点授权）"
     fi
@@ -289,7 +311,7 @@ preflight() {
 install_tailscale() {
     step "安装 Tailscale"
     if [[ $DRY_RUN -eq 0 ]] && command -v tailscale >/dev/null 2>&1; then
-        ok "tailscale 已安装：$(tailscale version 2>/dev/null | head -n1)"
+        ok "tailscale 已安装：$(tailscale version 2>/dev/null | head -n1 || true)"
     else
         dim "apt 源：https://pkgs.tailscale.com/stable/debian ${SUITE:-<suite>} main"
         if [[ $DRY_RUN -eq 0 ]]; then
@@ -329,12 +351,67 @@ install_tailscale() {
     fi
 }
 
+apply_runtime_prefs() {
+    # 已登录时不能再用 tailscale up 改 hostname/tags（会要求重新授权），
+    # 但 SSH 与 DNS 偏好可以即时设置，而且幂等。
+    local accept_bool="false"
+    [[ $ACCEPT_DNS -eq 1 ]] && accept_bool="true"
+    local -a set_args=("--accept-dns=${accept_bool}")
+    if [[ $TS_SSH -eq 1 ]]; then
+        set_args+=("--ssh=true")
+    fi
+    if [[ $DRY_RUN -eq 1 ]]; then
+        dim "[dry-run] tailscale set ${set_args[*]}"
+        return 0
+    fi
+
+    local out rc=0
+    out="$(tailscale set "${set_args[@]}" 2>&1)" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        if grep -q 'lose-ssh' <<< "$out"; then
+            # tailscale 的保护：从 tailnet 内开启 Tailscale SSH 会重定向 22 端口，
+            # 当前这条 SSH 会话会被切断。不替用户做这个决定。
+            if [[ "${SSH_CONNECTION:-}" == 100.* ]]; then
+                warn "当前 SSH 会话来自 tailnet，开启 Tailscale SSH 会重定向 22 端口并切断本会话"
+                warn "已跳过运行偏好同步。请改用公网 IP 登录后重跑，或在云控制台执行："
+                warn "  tailscale set --ssh --accept-risk=lose-ssh"
+                return 0
+            fi
+            warn "tailscale 要求确认 lose-ssh 风险，重试并接受（本会话来自非 tailnet，安全）"
+            if tailscale set --accept-risk=lose-ssh "${set_args[@]}" >/dev/null 2>&1; then
+                ok "已同步运行偏好：${set_args[*]}（accept-risk=lose-ssh）"
+            else
+                warn "仍失败，手动执行：tailscale set --accept-risk=lose-ssh ${set_args[*]}"
+                return 0
+            fi
+        else
+            warn "tailscale set 失败：${out}"
+            warn "必要时手动：tailscale up --ssh --accept-dns=${accept_bool}"
+            return 0
+        fi
+    else
+        ok "已同步运行偏好：${set_args[*]}"
+    fi
+
+    if tailscale debug prefs 2>/dev/null | grep -qE '"RunSSH": *true'; then
+        ok "Tailscale SSH 已启用（RunSSH=true）"
+    elif [[ $TS_SSH -eq 1 ]]; then
+        warn "RunSSH 仍为 false，检查：tailscale debug prefs | grep RunSSH"
+    fi
+}
+
 join_tailnet() {
     step "加入 tailnet"
     local state; state="$(ts_backend_state)"
     if [[ "$state" == "Running" && $FORCE -eq 0 ]]; then
-        ok "已登录 tailnet，跳过（--force 可强制重登）"
-        dim "当前状态：$(tailscale status 2>/dev/null | head -n1 || true)"
+        ok "已登录 tailnet，跳过登录"
+        local actual
+        actual="$(tailscale status 2>/dev/null | head -n1 | awk '{print $2}' || true)"
+        if [[ -n "$actual" ]]; then
+            TS_HOSTNAME="$actual"
+        fi
+        dim "当前设备名：$(tailscale status 2>/dev/null | head -n1 || true)"
+        apply_runtime_prefs
         return 0
     fi
 
@@ -349,26 +426,54 @@ join_tailnet() {
     fi
     if [[ $TS_SSH -eq 1 ]]; then
         up_args+=("--ssh")
+        # 从 tailnet 内执行 up 时，tailscale 会要求确认 lose-ssh 风险；
+        # 老版本没有这个 flag，先探测再用。
+        if tailscale up --help 2>/dev/null | grep -q 'accept-risk'; then
+            up_args+=("--accept-risk=lose-ssh")
+        fi
     fi
     if [[ $FORCE -eq 1 ]]; then
         up_args+=("--force-reauth")
     fi
 
+    # 没有配置 tagOwners 的 tailnet 会拒绝 --advertise-tags，所以失败时自动降级为
+    # "无标签加入"，并提示怎么补。否则新用户第一次跑就会卡在 tag 错误上。
+    local up_ok=0
     if [[ -n "$TS_AUTHKEY" ]]; then
         up_args+=("--auth-key" "$TS_AUTHKEY")
         if [[ $DRY_RUN -eq 1 ]]; then
             dim "[dry-run] tailscale up --hostname ${TS_HOSTNAME} --accept-dns=${ACCEPT_DNS} --advertise-tags ${TS_TAGS} --auth-key $(mask "$TS_AUTHKEY")"
-        else
-            tailscale up "${up_args[@]}" || die "tailscale up 失败：检查 auth key 是否过期/已被使用，或 ACL 是否允许该 tag"
+            up_ok=1
+        elif tailscale up "${up_args[@]}"; then
+            up_ok=1
             ok "已用 auth key 登录"
         fi
     else
         dim "执行：tailscale up ${up_args[*]}（会打印授权 URL）"
         if [[ $DRY_RUN -eq 1 ]]; then
-            dim "[dry-run] 后台执行并捕获 https://login.tailscale.com/... 授权链接"
-        else
-            interactive_login "${up_args[@]}"
+            dim "[dry-run] 前台执行并打印 https://login.tailscale.com/... 授权链接"
+            up_ok=1
+        elif interactive_login "${up_args[@]}"; then
+            up_ok=1
         fi
+    fi
+
+    if [[ $up_ok -eq 0 && $DRY_RUN -eq 0 ]]; then
+        if [[ -n "$TS_TAGS" ]]; then
+            warn "带标签加入失败。常见原因：ACL 里没定义 tagOwners，或当前账号不是 tag owner"
+            warn "自动重试：去掉 --advertise-tags 再加入（之后配好 tagOwners 可用 --force 重登加标签）"
+            build_no_tag_args "${up_args[@]}"
+            if [[ -n "$TS_AUTHKEY" ]]; then
+                if tailscale up "${RETRY_ARGS[@]}"; then up_ok=1; ok "已用 auth key 登录（无标签）"; fi
+            else
+                if interactive_login "${RETRY_ARGS[@]}"; then up_ok=1; fi
+            fi
+            if [[ $up_ok -eq 1 ]]; then
+                warn "已加入 tailnet，但设备没有标签；ACL 里按 tag 授权的规则不会命中"
+                warn "配好 tagOwners 后：bash install.sh --force --tags ${TS_TAGS}"
+            fi
+        fi
+        [[ $up_ok -eq 1 ]] || die "tailscale up 失败（auth key 过期/已被使用，或网络问题；见上方输出）"
     fi
 
     if [[ $DRY_RUN -eq 0 ]]; then
@@ -409,21 +514,18 @@ interactive_login() {
     set -e
 
     if [[ "$rc" -eq 124 ]]; then
-        die "等待授权超时（10 分钟）。重跑脚本即可，已完成的步骤会跳过。"
+        warn "等待授权超时（10 分钟）；重跑脚本即可，已完成的步骤会跳过"
+        return 124
     fi
     if [[ "$rc" -ne 0 ]]; then
         cat "$tmp" >&2 || true
-        if [[ -n "$TS_TAGS" ]] && grep -qiE 'tag' "$tmp"; then
-            warn "看起来是标签问题：你的账号可能不是 tagOwner，或 ACL 里没定义 ${TS_TAGS}"
-            warn "临时绕过：去掉标签重跑 →  bash install.sh --tags ''"
-            warn "（或者先在控制台 Access controls 的 tagOwners 里加上你的账号）"
-        fi
-        die "tailscale up 失败（上面是原始输出）"
+        return "$rc"
     fi
     if ! grep -q 'login\.tailscale\.com' "$tmp"; then
         warn "没有在输出里识别到授权链接，但命令返回成功；用 tailscale status 确认一下"
     fi
     ok "授权完成"
+    return 0
 }
 
 create_ops_user() {
@@ -683,7 +785,10 @@ lockdown() {
     fi
 
     mkdir -p "$STATE_DIR"
-    if [[ -f "$SSHD_DROPIN" && ! -f "$SSHD_BACKUP" ]]; then
+    # 只备份"别人的"配置；如果已经是我们自己写的 drop-in（重复执行 --lockdown），
+    # 绝不能把它当成原始配置备份，否则 --unlock 会恢复成收口状态。
+    if [[ -f "$SSHD_DROPIN" && ! -f "$SSHD_BACKUP" ]] && \
+       ! grep -q "Managed by ${REPO_NAME}" "$SSHD_DROPIN" 2>/dev/null; then
         cp -a "$SSHD_DROPIN" "$SSHD_BACKUP"
     fi
 
@@ -710,6 +815,24 @@ EOS
     local unit; unit="$(sshd_unit)"
     systemctl reload "$unit" || systemctl restart "$unit"
     sleep 1
+
+    # 校验"生效值"而不是"我们写了什么"：云镜像常在 00-<厂商>.conf 里
+    # 写死 PermitRootLogin yes，靠文件名顺序压制会让收口静默失效。
+    local eff
+    eff="$(sshd -T 2>/dev/null || true)"
+    if ! grep -qiE '^permitrootlogin no$' <<< "$eff" || \
+       ! grep -qiE '^passwordauthentication no$' <<< "$eff"; then
+        warn "收口未完全生效：有更靠前的 sshd 配置覆盖了我们的设置"
+        grep -rnE '^[[:space:]]*(PermitRootLogin|PasswordAuthentication)' \
+            /etc/ssh/sshd_config /etc/ssh/sshd_config.d/ 2>/dev/null || true
+        rm -f "$SSHD_DROPIN"
+        if [[ -f "$SSHD_BACKUP" ]]; then cp -a "$SSHD_BACKUP" "$SSHD_DROPIN"; fi
+        systemctl reload "$unit" >/dev/null 2>&1 || true
+        save_state "0"
+        die "已回滚 sshd 修改。请先处理上面列出的配置（去掉其中的 PermitRootLogin yes / PasswordAuthentication yes），再重跑 --lockdown"
+    fi
+    ok "生效配置已确认：PermitRootLogin=no, PasswordAuthentication=no"
+
     if ss -ltn 2>/dev/null | awk 'NR>1 {print $4}' | grep -qx "${ts4}:22"; then
         ok "sshd 已在 ${ts4}:22 监听"
     else
@@ -734,7 +857,7 @@ unlock() {
         return 0
     fi
     local unit; unit="$(sshd_unit)"
-    if [[ -f "$SSHD_BACKUP" ]]; then
+    if [[ -f "$SSHD_BACKUP" ]] && ! grep -q "Managed by ${REPO_NAME}" "$SSHD_BACKUP" 2>/dev/null; then
         cp -a "$SSHD_BACKUP" "$SSHD_DROPIN"
         ok "已恢复收口前的 drop-in 备份"
     elif [[ -f "$SSHD_DROPIN" ]]; then

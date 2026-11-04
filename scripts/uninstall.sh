@@ -19,7 +19,7 @@ set -Eeuo pipefail
 VERSION="1.0.0"
 STATE_DIR="/etc/tailscale-oneclick"
 STATE_FILE="${STATE_DIR}/state.env"
-SSHD_DROPIN="/etc/ssh/sshd_config.d/99-tailscale-oneclick.conf"
+SSHD_DROPIN="/etc/ssh/sshd_config.d/00-0-tailscale-oneclick.conf"
 SSHD_BACKUP="${STATE_DIR}/sshd-dropin.bak"
 SUDOERS_FILE="/etc/sudoers.d/90-opsagent"
 OPS_DIR="/etc/opsagent"
@@ -129,7 +129,7 @@ sshd_unit() {
 
 # ------------------------------- 1. sshd 收口 --------------------------------
 step "撤销 sshd 收口"
-if [[ -f "$SSHD_BACKUP" ]]; then
+if [[ -f "$SSHD_BACKUP" ]] && ! grep -q "Managed by tailscale-oneclick-debian" "$SSHD_BACKUP" 2>/dev/null; then
     run cp -a "$SSHD_BACKUP" "$SSHD_DROPIN"
     ok "已恢复收口前的 drop-in"
 elif [[ -f "$SSHD_DROPIN" ]]; then

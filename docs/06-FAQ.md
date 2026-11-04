@@ -125,6 +125,16 @@ sudo bash verify.sh
 
 ## 排错
 
+**Q：部署时提示"带标签加入失败"怎么办？**
+
+说明 ACL 里还没有 `tagOwners`，或者你的账号不是 tag owner。脚本会**自动降级**成无标签加入，
+所以服务器照样能用，只是 ACL 里按 `tag:server` 授权的规则不会命中。
+去 [02-首次配置-ACL.md](02-首次配置-ACL.md) 配好 `tagOwners` 后：
+
+```bash
+bash install.sh --force --tags tag:server
+```
+
 **Q：`tailscale up` 报 "auth key is invalid"？**
 
 key 过期、已被使用（非 reusable）、或 tailnet 不匹配。重新生成一个。

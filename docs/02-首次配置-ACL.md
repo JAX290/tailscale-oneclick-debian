@@ -86,6 +86,10 @@ tailscale up --advertise-tags=tag:agent --reset
 > 打标签后设备属于 tailnet 而不是某个用户，**不会因为账号变动掉线**；
 > 同时该设备也不再继承"用户自己的设备"那套默认权限，权限完全由 ACL 决定（这正是我们要的）。
 
+> **没配 `tagOwners` 时打标签会失败**：`tailscale up --advertise-tags` 要求 ACL 的 `tagOwners`
+> 里有你的账号。脚本遇到这个错误会自动降级为"无标签加入"并提示（不会卡死），
+> 补好 `tagOwners` 后执行 `bash install.sh --force --tags tag:server` 重新加标签即可。
+
 ### 5. 保存并验证
 
 保存后立刻验证，**不要等下次需要登录时才发现配错**：
