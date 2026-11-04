@@ -45,7 +45,30 @@ warn() { printf '  %s %s\n' "${C_YEL}!${C_RST}" "$*" >&2; }
 die()  { printf '  %s %s\n' "${C_RED}✗${C_RST}" "$*" >&2; exit 1; }
 
 usage() {
-    sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+    cat <<'EOF'
+tailscale-oneclick-debian 卸载 / 回滚
+
+用法: bash uninstall.sh [选项]
+
+默认行为:
+  - 撤销 --lockdown 对 sshd 的修改（恢复备份或删除 drop-in）
+  - 删除 sudo 白名单、包装脚本、audit 规则、状态文件
+  - 默认删除 opsagent 账号（家目录保留）
+  - 默认保留 tailscale 与 tailnet 登录
+
+选项:
+  -y, --yes            非交互确认
+  --keep-user          保留 opsagent 账号
+  --purge-tailscale    退出 tailnet 并卸载 tailscale 包（同时清理 apt 源）
+  --dry-run            只打印计划，不改系统
+  -h, --help           显示本帮助
+  -V, --version        显示版本
+
+示例:
+  sudo bash uninstall.sh
+  sudo bash uninstall.sh --dry-run
+  sudo bash uninstall.sh --purge-tailscale -y
+EOF
 }
 
 while [[ $# -gt 0 ]]; do

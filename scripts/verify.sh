@@ -18,13 +18,31 @@ SUDOERS_FILE="/etc/sudoers.d/90-opsagent"
 ALLOW_FILE="/etc/opsagent/services.allow"
 QUIET=0
 
+usage() {
+    cat <<'EOF'
+tailscale-oneclick-debian 自检
+
+用法: bash verify.sh [选项]
+
+选项:
+  --quiet, -q    只输出失败项和总结
+  -h, --help     显示本帮助
+  -V, --version  显示版本
+
+退出码:
+  0 = 没有失败项（可能有提示）
+  1 = 有失败项
+
+说明:
+  推荐用 root 跑（能检查 sshd 生效配置、sudo -l、auditctl）；
+  非 root 也能跑，但相关检查会标记为"跳过"。
+EOF
+}
+
 for arg in "$@"; do
     case "$arg" in
         --quiet|-q) QUIET=1 ;;
-        -h|--help)
-            sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
-            exit 0
-            ;;
+        -h|--help) usage; exit 0 ;;
         -V|--version) printf 'verify.sh %s\n' "$VERSION"; exit 0 ;;
         *) printf '未知参数: %s（--help）\n' "$arg" >&2; exit 2 ;;
     esac
