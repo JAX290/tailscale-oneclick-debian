@@ -760,6 +760,10 @@ lockdown() {
     step "收口 sshd（只监听 tailnet）"
 
     command -v sshd >/dev/null 2>&1 || die "没有 sshd（没装 openssh-server？），收口没有意义"
+    # lockdown 模式不经过 join_tailnet，这里补一次真实设备名（提示信息里要用）
+    local actual
+    actual="$(tailscale status 2>/dev/null | head -n1 | awk '{print $2}' || true)"
+    [[ -n "$actual" ]] && TS_HOSTNAME="$actual"
     [[ "$(ts_backend_state)" == "Running" ]] || die "Tailscale 未登录，先跑阶段一完成 tailscale up"
     local ts4; ts4="$(ts_ipv4 || true)"
     [[ "$ts4" == 100.* ]] || die "拿不到 tailnet IPv4（当前：'${ts4:-空}'），先确认 tailscale status"
