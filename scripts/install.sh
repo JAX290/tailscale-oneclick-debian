@@ -205,6 +205,10 @@ if [[ -n "$PUBKEY" && "$PUBKEY" == @* ]]; then
     PUBKEY="$(tr -d '\r\n' < "${PUBKEY#@}")"
 fi
 
+# Tailscale 要求设备名是合法 DNS 标签：去掉非法字符，截断到 63 字符
+TS_HOSTNAME="$(printf '%s' "$TS_HOSTNAME" | tr -cd 'A-Za-z0-9-' | cut -c1-63)"
+[[ -n "$TS_HOSTNAME" ]] || die "--hostname 为空或只含非法字符（只允许字母/数字/连字符）"
+
 # ------------------------------- 基础检查 ------------------------------------
 require_root() {
     [[ $DRY_RUN -eq 1 ]] && return 0
@@ -409,6 +413,11 @@ interactive_login() {
     fi
     if [[ "$rc" -ne 0 ]]; then
         cat "$tmp" >&2 || true
+        if [[ -n "$TS_TAGS" ]] && grep -qiE 'tag' "$tmp"; then
+            warn "看起来是标签问题：你的账号可能不是 tagOwner，或 ACL 里没定义 ${TS_TAGS}"
+            warn "临时绕过：去掉标签重跑 →  bash install.sh --tags ''"
+            warn "（或者先在控制台 Access controls 的 tagOwners 里加上你的账号）"
+        fi
         die "tailscale up 失败（上面是原始输出）"
     fi
     if ! grep -q 'login\.tailscale\.com' "$tmp"; then
