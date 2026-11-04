@@ -1,0 +1,48 @@
+name: checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 行尾必须是 LF
+        run: |
+          bad="$(git ls-files --eol | grep -E 'i/(crlf|mixed)' || true)"
+          if [ -n "$bad" ]; then
+            echo "以下文件不是 LF 行尾（Windows 提交很容易踩）："
+            echo "$bad"
+            exit 1
+          fi
+
+      - name: 语法检查（bash -n）
+        run: |
+          for f in scripts/*.sh; do
+            echo "== $f"
+            bash -n "$f"
+          done
+
+      - name: 帮助与版本
+        run: |
+          bash scripts/install.sh --help >/dev/null
+          bash scripts/install.sh --version
+          bash scripts/verify.sh --help >/dev/null
+          bash scripts/uninstall.sh --help >/dev/null
+
+      - name: dry-run（只打印计划，不改系统）
+        run: bash scripts/install.sh --dry-run
+
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck -S error scripts/*.sh

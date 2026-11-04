@@ -1,0 +1,33 @@
+{
+  "//": "tailnet policy 示例：给 tailscale-oneclick-debian 用。",
+  "//1": "把整段贴进 Tailscale 管理后台 Access Controls，或只摘取 tagOwners / acls / ssh 三段合并。",
+  "//2": "重要：默认策略里有一条 autogroup:member -> autogroup:self 的 ssh 规则，users 含 root。",
+  "//3": "部署完必须先删掉那条默认规则，否则你笔记本上的任何账号都能以 root 通过 Tailscale SSH 登录服务器。",
+
+  "tagOwners": {
+    "tag:server": ["autogroup:admin"],
+    "tag:agent": ["autogroup:admin"]
+  },
+
+  "hosts": {
+    "agent-box": "100.64.0.10"
+  },
+
+  "acls": [
+    {
+      "action": "accept",
+      "src": ["tag:agent"],
+      "dst": ["tag:server:22"]
+    }
+  ],
+
+  "ssh": [
+    {
+      "action": "check",
+      "src": ["tag:agent"],
+      "dst": ["tag:server"],
+      "users": ["opsagent"],
+      "checkPeriod": "12h"
+    }
+  ]
+}
